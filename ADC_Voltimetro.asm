@@ -37,16 +37,13 @@ DISPLAY_7SEG EQU  P1      	; segmentos a, b, c, d, e, f, g, dp dos displays
     ORG  0000H
     JMP  INICIO
 
-    ORG  0030H
-
 INICIO:
-    MOV  SP,   #50H
+    MOV  SP,   #2FH
     MOV  DPTR, #TAB_DISPLAY_7SEG
 
     ; ADC em repouso
     SETB RD_ADC
     SETB WR_ADC
-
     
     SETB CS_DECODER
 
