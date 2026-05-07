@@ -1,6 +1,11 @@
 ; VOLTÍMETRO DIGITAL
 ; 	Formato: X.XXX
 
+; Nesta versão decidi retirar o armazenamento dos bytes codificados para o display de 7 segmentos nas memórias de programa (RAM) 20H, 21H, 22H e 23H e colocar nos registradores R2, R3, R4 e R5.
+; Além disso, mudei a forma de exibição nos displays. Antes o uC coletava o valor do ADC e colocava em A e com esse valor calculava os numeros da unidade, décimo, centésimo e milésimo e, então,
+; exibia eles com ajuda de um delay para cada display. Agora o uC calcula um numero, exibe ele no seu respectivo display e calcula o próximo para depois exibir, sendo este tempo de cálculo o delay
+; para exibir de um display para o outro
+
 ; REGISTRADORES 
 ;   A, B  – operandos MUL
 ;   R2    – dígito unidades
@@ -80,7 +85,7 @@ CALC_DIGITOS:
 	; cálculo da unidade
     MOV  B,    #5
     MUL  AB                
-    MOV  R0,   B
+    MOV  R2,   B
 
 	; conversão para display 7 seg
 	MOV  A,    R2          ; DISP3: unidades + ponto decimal
