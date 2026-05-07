@@ -36,24 +36,16 @@ A1_DECODER  EQU  P3.4     	; bit MSB de seleção do display
 DADOS_ADC    EQU  P2     	; D0–D7 do ADC: leitura do valor convertido
 DISPLAY_7SEG EQU  P1      	; segmentos a, b, c, d, e, f, g, dp dos displays
 
-    ORG  0000H
+ORG  0000H
     JMP  INICIO
 
 INICIO:
-	 MOV	SP, #2FH
+	MOV	SP, #2FH
     MOV  DPTR, #TAB_DISPLAY_7SEG
 
     ; ADC em repouso
     SETB RD_ADC
     SETB WR_ADC
-
-    ;SETB CS_DECODER
-
-    ; Inicializa RAM dos displays com 0FFH (segmentos apagados)
-    MOV  20H,  #0FFH
-    MOV  21H,  #0FFH
-    MOV  22H,  #0FFH
-    MOV  23H,  #0FFH
 
 MAIN_LOOP:
 
@@ -63,9 +55,8 @@ MAIN_LOOP:
     NOP
     SETB WR_ADC
 
-    ; Mantém displays atualizados até o fim da conversão
+    ; Espera ADC estar OK para coletar D0-D7
 ESPERA_AND_REFRESH:
-    ACALL REFRESH
     JB   INTR_ADC, ESPERA_AND_REFRESH
 
     ; Leitura do ADC
@@ -74,10 +65,6 @@ ESPERA_AND_REFRESH:
     NOP
     MOV  A,    DADOS_ADC
     SETB RD_ADC
-
-    ACALL CALC_DIGITOS
-
-    SJMP MAIN_LOOP
 
 ; CALC_DIGITOS
 ; Entrada : A = valor ADC (0–255)
@@ -90,98 +77,94 @@ ESPERA_AND_REFRESH:
 CALC_DIGITOS:
 
     ; UNIDADES
+	; cálculo da unidade
     MOV  B,    #5
     MUL  AB                
     MOV  R0,   B
-	 SJMP EXIBE_UNIDADE
 
-    ; DÉCIMOS
-    MOV  B,    #10
-    MUL  AB
-    MOV  R1,   B
-	 SJMP EXIBE_DECIMO
-
-    ; CENTÉSIMOS
-    MOV  B,    #10
-    MUL  AB
-    MOV  R2,   B
-	 SJMP EXIBE_CENTESIMO
-
-    ; MILÉSIMOS
-    MOV  B,    #10
-    MUL  AB
-    MOV  R3,   B
-	 SJMP EXIBE_MILESIMO
-
-    ; Converte dígitos em códigos 7-seg e grava na RAM
-
-    MOV  A,    R0          ; DISP3: unidades + ponto decimal
+	; conversão para display 7 seg
+	MOV  A,    R2          ; DISP3: unidades + ponto decimal
     MOVC A,    @A+DPTR
     ANL  A,    #7FH        ; bit 7 = 0 → acende dp
     MOV  R2,  A
+	ACALL REFRESH_UNIDADE
 
-    MOV  A,    R1          ; DISP2: décimos
+    ; DÉCIMOS
+	; cálculo décimo
+    MOV  B,    #10
+    MUL  AB
+    MOV  R3,   B
+
+	; conversão para display 7 seg
+	MOV  A,    R3          ; DISP2: décimos
     MOVC A,    @A+DPTR
     MOV  R3,  A
+	ACALL REFRESH_DECIMO
 
-    MOV  A,    R2          ; DISP1: centésimos
+    ; CENTÉSIMOS
+	; cálculo centésimo
+    MOV  B,    #10
+    MUL  AB
+    MOV  R4,   B
+
+	; conversão para display 7 seg
+    MOV  A,    R4          ; DISP1: centésimos
     MOVC A,    @A+DPTR
     MOV  R4,  A
+	ACALL REFRESH_CENTESIMO
 
-    MOV  A,    R3          ; DISP0: milésimos
+    ; MILÉSIMOS
+	; cálculo milésimo
+    MOV  B,    #10
+    MUL  AB
+    MOV  R5,   B
+
+	; conversão para display 7 seg
+    MOV  A,    R5          ; DISP0: milésimos
     MOVC A,    @A+DPTR
     MOV  R5,  A
+	ACALL REFRESH_MILESIMO
 
-    RET
+    SJMP MAIN_LOOP
 
-; REFRESH – Multiplex dos 4 displays
-
-; Por display:
-;   1. DISPLAY_7SEG = #0FFH (apaga display antes de atualizar)
-;   2. Atualiza A1/A0
-;   3. acende dígito correto
-;   4. DELAY_DISP
-
-REFRESH:
-
+REFRESH_UNIDADE:
     ; DISP3: unidades, A1=1 A0=1
     CLR CS_DECODER
     SETB A1_DECODER
     SETB A0_DECODER
-	 MOV  DISPLAY_7SEG, R2
-    ACALL DELAY_DISP
+	MOV  DISPLAY_7SEG, R2
+	SETB CS_DECODER
 
+	RET
+
+REFRESH_DECIMO:
     ; DISP2: décimos, A1=1 A0=0
     CLR CS_DECODER
     SETB A1_DECODER
     CLR  A0_DECODER
-	 MOV  DISPLAY_7SEG, R3
-    ACALL DELAY_DISP
+	MOV  DISPLAY_7SEG, R3
+	SETB CS_DECODER
 
+	RET
+
+REFRESH_CENTESIMO:
     ; DISP1: centésimos, A1=0 A0=1
     CLR CS_DECODER
     CLR  A1_DECODER
     SETB A0_DECODER
-	 MOV  DISPLAY_7SEG, R4
-    ACALL DELAY_DISP
+	MOV  DISPLAY_7SEG, R4
+	SETB CS_DECODER
 
+	RET
+
+REFRESH_MILESIMO:
     ; DISP0: milésimos, A1=0 A0=0
     CLR CS_DECODER
     CLR  A1_DECODER
     CLR  A0_DECODER
-	 MOV  DISPLAY_7SEG, R5
-    ACALL DELAY_DISP
+	MOV  DISPLAY_7SEG, R5
+	SETB CS_DECODER
 
-    RET
-
-DELAY_DISP:
-    MOV  R7,   #100
-LOOP_DISPLAY:
-    NOP
-    NOP
-    NOP
-    NOP
-    DJNZ R7,   LOOP_DISPLAY
     RET
 
 TAB_DISPLAY_7SEG:
