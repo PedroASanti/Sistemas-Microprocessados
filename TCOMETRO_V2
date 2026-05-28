@@ -118,6 +118,87 @@ MAIN:
     SETB EX0                ; habilita interrupcao INT0
     SETB TR0                ; Timer 0 comeca a contar a partir daqui
 
+;================================================================
+; LCD - HD44780, modo 8 bits
+;================================================================
+;================================================================
+; LCD_INIT - HD44780, modo 8 bits
+; Segue Figure 23 do datasheet com tempos minimos.
+; Apos os 3 Function Sets iniciais, usa delays minimos do datasheet.
+; Simulador nao suporta polling do BF - delays fixos sao necessarios.
+;================================================================
+LCD_INIT:
+    CLR  LCD_RW             ; P2.2=0: sempre escrita
+    CLR  LCD_RS
+    CLR  LCD_E
+    LCALL DELAY_15MS        ; > 15ms apos VCC (datasheet Fig.23)
+
+    ;--- 1o Function Set: DB5=1 DB4=1 ---
+    MOV  P0, #30H
+    SETB LCD_E
+    CLR  LCD_E
+    LCALL DELAY_4100US      ; > 4,1ms
+
+    ;--- 2o Function Set ---
+    MOV  P0, #30H
+    SETB LCD_E
+    CLR  LCD_E
+    LCALL DELAY_100US       ; > 100us (BF ainda nao disponivel)
+
+    ;--- 3o Function Set ---
+    MOV  P0, #30H
+    SETB LCD_E
+    CLR  LCD_E
+    LCALL DELAY_100US       ; > 100us
+
+    ; delays fixos conforme Table 6 do datasheet
+
+    ; Function Set: 8 bits, 2 linhas, fonte 5x8 = 38H (37us)
+    MOV  A, #38H
+    LCALL LCD_CMD
+
+    ; Display OFF = 08H (37us)
+    MOV  A, #08H
+    LCALL LCD_CMD
+
+    ; Clear Display = 01H (1,52ms - mais lento que os demais)
+    MOV  A, #01H
+    LCALL LCD_CMD
+    LCALL DELAY_1520US      ; espera extra: Clear leva ate 1,52ms
+
+    ; Entry Mode Set = 06H (37us)
+    MOV  A, #06H
+    LCALL LCD_CMD
+
+    ; Display ON, cursor OFF = 0CH (37us)
+    MOV  A, #0CH
+    LCALL LCD_CMD
+
+    RET
+
+;================================================================
+; LCD_CMD - Envia comando (RS=0)
+; LCD_DATA - Envia dado (RS=1)
+; Delay pos-comando: 37us para maioria das instrucoes (Table 6)
+; Excecao: Clear Display e Return Home precisam de 1,52ms -
+; chamador deve usar DELAY_1520US apos enviar 01H ou 02H.
+;================================================================
+LCD_CMD:
+    CLR  LCD_RS
+    MOV  P0, A
+    SETB LCD_E
+    CLR  LCD_E
+    LCALL DELAY_37US
+    RET
+
+LCD_DATA:
+    SETB LCD_RS
+    MOV  P0, A
+    SETB LCD_E
+    CLR  LCD_E
+    LCALL DELAY_37US
+    RET
+
 ;----------------------------------------------------------------
 ; LOOP PRINCIPAL
 ;----------------------------------------------------------------
@@ -252,87 +333,6 @@ ISR_T0_FIM:
     POP  PSW
     POP  ACC
     RETI
-
-;================================================================
-; LCD - HD44780, modo 8 bits
-;================================================================
-;================================================================
-; LCD_INIT - HD44780, modo 8 bits
-; Segue Figure 23 do datasheet com tempos minimos.
-; Apos os 3 Function Sets iniciais, usa delays minimos do datasheet.
-; Simulador nao suporta polling do BF - delays fixos sao necessarios.
-;================================================================
-LCD_INIT:
-    CLR  LCD_RW             ; P2.2=0: sempre escrita
-    CLR  LCD_RS
-    CLR  LCD_E
-    LCALL DELAY_15MS        ; > 15ms apos VCC (datasheet Fig.23)
-
-    ;--- 1o Function Set: DB5=1 DB4=1 ---
-    MOV  P0, #30H
-    SETB LCD_E
-    CLR  LCD_E
-    LCALL DELAY_4100US      ; > 4,1ms
-
-    ;--- 2o Function Set ---
-    MOV  P0, #30H
-    SETB LCD_E
-    CLR  LCD_E
-    LCALL DELAY_100US       ; > 100us (BF ainda nao disponivel)
-
-    ;--- 3o Function Set ---
-    MOV  P0, #30H
-    SETB LCD_E
-    CLR  LCD_E
-    LCALL DELAY_100US       ; > 100us
-
-    ; delays fixos conforme Table 6 do datasheet
-
-    ; Function Set: 8 bits, 2 linhas, fonte 5x8 = 38H (37us)
-    MOV  A, #38H
-    LCALL LCD_CMD
-
-    ; Display OFF = 08H (37us)
-    MOV  A, #08H
-    LCALL LCD_CMD
-
-    ; Clear Display = 01H (1,52ms - mais lento que os demais)
-    MOV  A, #01H
-    LCALL LCD_CMD
-    LCALL DELAY_1520US      ; espera extra: Clear leva ate 1,52ms
-
-    ; Entry Mode Set = 06H (37us)
-    MOV  A, #06H
-    LCALL LCD_CMD
-
-    ; Display ON, cursor OFF = 0CH (37us)
-    MOV  A, #0CH
-    LCALL LCD_CMD
-
-    RET
-
-;================================================================
-; LCD_CMD - Envia comando (RS=0)
-; LCD_DATA - Envia dado (RS=1)
-; Delay pos-comando: 37us para maioria das instrucoes (Table 6)
-; Excecao: Clear Display e Return Home precisam de 1,52ms -
-; chamador deve usar DELAY_1520US apos enviar 01H ou 02H.
-;================================================================
-LCD_CMD:
-    CLR  LCD_RS
-    MOV  P0, A
-    SETB LCD_E
-    CLR  LCD_E
-    LCALL DELAY_37US
-    RET
-
-LCD_DATA:
-    SETB LCD_RS
-    MOV  P0, A
-    SETB LCD_E
-    CLR  LCD_E
-    LCALL DELAY_37US
-    RET
 
 ;================================================================
 ; RPM_TO_ASCII - converte RPM_H:RPM_L em RPM_BUF0..4
