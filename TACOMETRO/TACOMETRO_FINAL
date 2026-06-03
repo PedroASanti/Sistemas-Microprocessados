@@ -162,9 +162,6 @@ ISR_INT0:
     PUSH PSW
     MOV  PSW, #08H
 
-AGUARDA_SOLTAR:
-    JNB  SW_PIN, AGUARDA_SOLTAR
-
 ; Incrementa apenas se nao atingiu o limite de 54 voltas
     MOV  A, VOLTAS_WIN
     CJNE A, #VOLTAS_MAX, VERIFICA_MAX
