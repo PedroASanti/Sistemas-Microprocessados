@@ -1,0 +1,413 @@
+; Configuracao LCD e Switch
+LCD_RS       EQU  P2.0
+LCD_E        EQU  P2.1
+LCD_RW       EQU  P2.2
+SW_PIN       EQU  P3.2
+
+; Configuracao Timer 0 (modo 1, 16 bits, 50ms por overflow)
+; 65536 - 50000 = 15536 = 3CB0H
+T0_RELOAD_H  EQU  3CH
+T0_RELOAD_L  EQU  0B0H
+T0_OVERHEAD  EQU  3
+OV_MAX       EQU  1
+
+; Configuracao RPM
+; RPM = voltas x 1200  (60s / 0,05s = 1200 = 6 x 200)
+RPM_MULT_A   EQU  6
+RPM_MULT_B   EQU  200
+
+; Limite de voltas por janela
+; VOLTAS_WIN x 1200 <= 65535, logo VOLTAS_WIN <= 54
+VOLTAS_MAX   EQU  54
+
+; Variaveis na RAM interna
+OV_COUNT     EQU  20H
+VOLTAS_WIN   EQU  21H
+RPM_L        EQU  23H
+RPM_H        EQU  24H
+NOVO_RPM     EQU  25H
+VOLTAS_ULT   EQU  26H
+
+; Buffers ASCII para display
+RPM_BUF0     EQU  30H
+RPM_BUF1     EQU  31H
+RPM_BUF2     EQU  32H
+RPM_BUF3     EQU  33H
+RPM_BUF4     EQU  34H
+VOL_BUF3     EQU  38H
+VOL_BUF4     EQU  39H
+
+; Vetores de interrupcao
+    ORG  0000H
+    LJMP MAIN
+
+    ORG  0003H
+    LJMP ISR_INT0
+
+    ORG  000BH
+    LJMP ISR_T0
+
+    ORG  0050H
+
+MAIN:
+    MOV  SP, #3FH
+
+; Inicializacao das variaveis
+    MOV  OV_COUNT,  #0
+    MOV  VOLTAS_WIN,#0
+    MOV  RPM_L,     #0
+    MOV  RPM_H,     #0
+    MOV  NOVO_RPM,  #0
+    MOV  VOLTAS_ULT,#0
+
+    SETB SW_PIN
+
+    LCALL LCD_INIT
+
+; Labels fixos no LCD
+    MOV  A, #80H
+    LCALL LCD_CMD
+    MOV  A, #52H
+    LCALL LCD_DATA
+    MOV  A, #50H
+    LCALL LCD_DATA
+    MOV  A, #4DH
+    LCALL LCD_DATA
+    MOV  A, #3AH
+    LCALL LCD_DATA
+
+    MOV  A, #0C0H
+    LCALL LCD_CMD
+    MOV  A, #56H
+    LCALL LCD_DATA
+    MOV  A, #4FH
+    LCALL LCD_DATA
+    MOV  A, #4CH
+    LCALL LCD_DATA
+    MOV  A, #54H
+    LCALL LCD_DATA
+    MOV  A, #41H
+    LCALL LCD_DATA
+    MOV  A, #53H
+    LCALL LCD_DATA
+    MOV  A, #3AH
+    LCALL LCD_DATA
+
+; Configuracao do Timer 0 e interrupcoes
+    MOV  TMOD, #01H
+    MOV  TH0, #T0_RELOAD_H
+    MOV  TL0, #T0_RELOAD_L
+
+    SETB IT0
+    CLR  TF0
+    CLR  IE0
+
+    SETB EA
+    SETB ET0
+    SETB EX0
+    SETB TR0
+
+LOOP:
+    MOV  A, NOVO_RPM
+    JZ   LOOP
+    MOV  NOVO_RPM, #0
+
+; Calculo do RPM (VOLTAS x 1200 = VOLTAS x 6 x 200)
+    MOV  A, VOLTAS_ULT
+    MOV  B, #RPM_MULT_A
+    MUL  AB
+    MOV  R3, B
+
+    MOV  B, #RPM_MULT_B
+    MUL  AB
+    MOV  RPM_L, A
+    MOV  RPM_H, B
+
+    MOV  A, R3
+    MOV  B, #RPM_MULT_B
+    MUL  AB
+    ADD  A, RPM_H
+    MOV  RPM_H, A
+
+    LCALL RPM_TO_ASCII
+    LCALL VOL_TO_ASCII
+
+; Atualizacao do LCD - linha 1 (RPM)
+    MOV  A, #84H
+    LCALL LCD_CMD
+    MOV  R0, #RPM_BUF0
+    MOV  R2, #5
+PRINT_RPM:
+    MOV  A, @R0
+    LCALL LCD_DATA
+    INC  R0
+    DJNZ R2, PRINT_RPM
+
+; Atualizacao do LCD - linha 2 (VOLTAS)
+    MOV  A, #0C7H
+    LCALL LCD_CMD
+    MOV  R0, #VOL_BUF3
+    MOV  R2, #2
+PRINT_VOL:
+    MOV  A, @R0
+    LCALL LCD_DATA
+    INC  R0
+    DJNZ R2, PRINT_VOL
+
+    AJMP LOOP
+
+; Interrupcao externa INT0 - contagem de voltas por borda de descida
+ISR_INT0:
+    PUSH ACC
+    PUSH PSW
+    MOV  PSW, #08H
+
+AGUARDA_SOLTAR:
+    JNB  SW_PIN, AGUARDA_SOLTAR
+
+; Incrementa apenas se nao atingiu o limite de 54 voltas
+    MOV  A, VOLTAS_WIN
+    CJNE A, #VOLTAS_MAX, VERIFICA_MAX
+VERIFICA_MAX:
+    JNC  INT0_FIM
+    INC  VOLTAS_WIN
+
+INT0_FIM:
+    CLR  IE0
+    POP  PSW
+    POP  ACC
+    RETI
+
+; Interrupcao Timer 0 - controle da janela de tempo (50ms)
+ISR_T0:
+    PUSH ACC
+    PUSH PSW
+    MOV  PSW, #08H
+
+; Recarregamento do Timer 0 com compensacao dinamica de latencia
+    MOV  A, TL0
+    ADD  A, #T0_RELOAD_L
+    ADD  A, #T0_OVERHEAD
+    MOV  TL0, A
+    MOV  TH0, #T0_RELOAD_H
+
+    INC  OV_COUNT
+    MOV  A, OV_COUNT
+    CJNE A, #OV_MAX, ISR_T0_FIM
+
+; Janela de 50ms concluida
+    MOV  OV_COUNT, #0
+    MOV  A, VOLTAS_WIN
+    MOV  VOLTAS_ULT, A
+    MOV  VOLTAS_WIN, #0
+    MOV  NOVO_RPM, #1
+
+ISR_T0_FIM:
+    POP  PSW
+    POP  ACC
+    RETI
+
+; Inicializacao do LCD HD44780 modo 8 bits
+; Sequencia conforme Figure 23 do datasheet com tempos minimos
+LCD_INIT:
+    CLR  LCD_RW
+    CLR  LCD_RS
+    CLR  LCD_E
+    LCALL DELAY_15MS
+
+; Tres Function Sets para reset por software (BF indisponivel neste momento)
+    MOV  P0, #30H
+    SETB LCD_E
+    CLR  LCD_E
+    LCALL DELAY_4100US
+
+    MOV  P0, #30H
+    SETB LCD_E
+    CLR  LCD_E
+    LCALL DELAY_100US
+
+    MOV  P0, #30H
+    SETB LCD_E
+    CLR  LCD_E
+    LCALL DELAY_100US
+
+; Configuracao final do LCD
+    MOV  A, #38H
+    LCALL LCD_CMD
+    MOV  A, #08H
+    LCALL LCD_CMD
+    MOV  A, #01H
+    LCALL LCD_CMD
+    LCALL DELAY_1520US
+    MOV  A, #06H
+    LCALL LCD_CMD
+    MOV  A, #0CH
+    LCALL LCD_CMD
+    RET
+
+LCD_CMD:
+    CLR  LCD_RS
+    MOV  P0, A
+    SETB LCD_E
+    CLR  LCD_E
+    LCALL DELAY_37US
+    RET
+
+LCD_DATA:
+    SETB LCD_RS
+    MOV  P0, A
+    SETB LCD_E
+    CLR  LCD_E
+    LCALL DELAY_37US
+    RET
+
+; Conversao RPM para ASCII (5 digitos em RPM_BUF0..4)
+RPM_TO_ASCII:
+    MOV  R1, RPM_H
+    MOV  R0, RPM_L
+
+    MOV  R3, #0
+DIG_R_10K:
+    MOV  A,  R0
+    CLR  C
+    SUBB A,  #10H
+    MOV  R2, A
+    MOV  A,  R1
+    SUBB A,  #27H
+    JC   FIM_R_10K
+    MOV  R1, A
+    MOV  A,  R2
+    MOV  R0, A
+    INC  R3
+    AJMP DIG_R_10K
+FIM_R_10K:
+    MOV  A, R3
+    ADD  A, #30H
+    MOV  RPM_BUF0, A
+
+    MOV  R3, #0
+DIG_R_1K:
+    MOV  A,  R0
+    CLR  C
+    SUBB A,  #0E8H
+    MOV  R2, A
+    MOV  A,  R1
+    SUBB A,  #03H
+    JC   FIM_R_1K
+    MOV  R1, A
+    MOV  A,  R2
+    MOV  R0, A
+    INC  R3
+    AJMP DIG_R_1K
+FIM_R_1K:
+    MOV  A, R3
+    ADD  A, #30H
+    MOV  RPM_BUF1, A
+
+    MOV  R3, #0
+DIG_R_100:
+    MOV  A,  R0
+    CLR  C
+    SUBB A,  #64H
+    MOV  R2, A
+    MOV  A,  R1
+    SUBB A,  #00H
+    JC   FIM_R_100
+    MOV  R1, A
+    MOV  A,  R2
+    MOV  R0, A
+    INC  R3
+    AJMP DIG_R_100
+FIM_R_100:
+    MOV  A, R3
+    ADD  A, #30H
+    MOV  RPM_BUF2, A
+
+    MOV  R3, #0
+DIG_R_10S:
+    MOV  A,  R0
+    CLR  C
+    SUBB A,  #0AH
+    MOV  R2, A
+    MOV  A,  R1
+    SUBB A,  #00H
+    JC   FIM_R_10S
+    MOV  R1, A
+    MOV  A,  R2
+    MOV  R0, A
+    INC  R3
+    AJMP DIG_R_10S
+FIM_R_10S:
+    MOV  A, R3
+    ADD  A, #30H
+    MOV  RPM_BUF3, A
+
+    MOV  A, R0
+    ADD  A, #30H
+    MOV  RPM_BUF4, A
+    RET
+
+; Conversao voltas para ASCII (dezena e unidade em VOL_BUF3..4)
+; Maximo 54 voltas: centena sempre zero, exibe apenas 2 digitos
+VOL_TO_ASCII:
+    MOV  R0, VOLTAS_ULT
+
+    MOV  R3, #0
+DIG_V_10S:
+    MOV  A,  R0
+    CLR  C
+    SUBB A,  #10
+    JC   FIM_V_10S
+    MOV  R0, A
+    INC  R3
+    AJMP DIG_V_10S
+FIM_V_10S:
+    MOV  A, R3
+    ADD  A, #30H
+    MOV  VOL_BUF3, A
+
+    MOV  A, R0
+    ADD  A, #30H
+    MOV  VOL_BUF4, A
+    RET
+
+; Delays baseados nos tempos minimos do datasheet HD44780
+; 12 MHz: 1 ciclo de maquina = 1 us
+DELAY_37US:
+    MOV  R7, #18
+    DJNZ R7, $
+    RET
+
+DELAY_100US:
+    MOV  R7, #49
+    DJNZ R7, $
+    RET
+
+DELAY_1520US:
+    MOV  R6, #15
+D1520_LOOP:
+    MOV  R7, #51
+    DJNZ R7, $
+    DJNZ R6, D1520_LOOP
+    RET
+
+DELAY_4100US:
+    MOV  R6, #41
+D4100_LOOP:
+    MOV  R7, #50
+    DJNZ R7, $
+    DJNZ R6, D4100_LOOP
+    RET
+
+DELAY_15MS:
+    MOV  R5, #3
+D15_LOOP:
+    MOV  R6, #25
+D15_INNER:
+    MOV  R7, #100
+    DJNZ R7, $
+    DJNZ R6, D15_INNER
+    DJNZ R5, D15_LOOP
+    RET
+
+    END
