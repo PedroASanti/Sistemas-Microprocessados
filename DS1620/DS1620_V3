@@ -1,0 +1,514 @@
+; DS1620 + LCD HD44780 - Termometro Digital
+; AT89S52 / MCU 8051 IDE, clock 12MHz (1 ciclo de maquina = 1us)
+; DS1620: DQ->P3.0, CLK->P3.1, RST->P3.2
+; LCD 8 bits: dados->P0, RS->P2.0, E->P2.1, RW->P2.2
+; LCD linha 1 mostra "TEMPERATURA:" (fixo), linha 2 mostra o valor lido
+;
+; Este arquivo usa polling real do bit DONE (DS1620_WAIT_DONE) e um delay
+; curto entre leituras (DELAY_SIM_PAUSA), porque o MCU8051 IDE com virtual
+; hardware ligado roda muito mais lento que tempo real. As versoes corretas
+; para hardware fisico (DELAY_900MS, DELAY_500MS, calculadas para 12MHz)
+; continuam no arquivo; troque a chamada em LOOP antes de gravar num chip real.
+
+DS_DQ        EQU  P3.0
+DS_CLK       EQU  P3.1
+DS_RST       EQU  P3.2
+
+LCD_RS       EQU  P2.0
+LCD_E        EQU  P2.1
+LCD_RW       EQU  P2.2
+
+CMD_WR_CFG   EQU  0CH       ; Write Config
+CMD_START    EQU  0EEH      ; Start Convert T
+CMD_RD_TEMP  EQU  0AAH      ; Read Temperature
+CMD_RD_CFG   EQU  0ACH      ; Read Config
+
+; Byte gravado no DS1620: CPU=1 (obrigatorio p/ modo 3 fios), 1SHOT=0 (continuo)
+CFG_CPU_CONT EQU  02H
+
+; Tentativas de polling do bit DONE em DS1620_WAIT_DONE. Junto com
+; DELAY_DONE_POLL (~50ms cada), cobre os 750ms do datasheet com margem.
+DONE_POLL_MAX EQU  18
+
+; Variaveis de trabalho (fora da area bit-enderecavel 20H-2FH)
+TEMP_RAW_L   EQU  30H       ; bits 0-7 da temperatura lida
+TEMP_RAW_H   EQU  31H       ; bit 8 (sinal)
+TEMP_INT     EQU  32H       ; parte inteira (graus)
+TEMP_FRAC    EQU  33H       ; fracao: 0 ou 5
+TEMP_NEG     EQU  34H       ; flag de sinal: 0=positivo, 1=negativo
+
+; Buffer ASCII para o LCD (ex: "-025.5")
+TBUF_SIGN    EQU  35H
+TBUF_DIG2    EQU  36H
+TBUF_DIG1    EQU  37H
+TBUF_DIG0    EQU  38H
+TBUF_DOT     EQU  39H
+TBUF_FRAC    EQU  3AH
+
+    ORG  0000H
+    LJMP MAIN
+
+    ORG  0050H
+
+; Zera registradores e portas antes de tudo. O MCU8051 IDE tem dois jeitos
+; de reiniciar a execucao: "Reset" (limpa tudo) e "Shutdown+Start" (pode
+; deixar lixo de execucoes anteriores em registradores). Sem essa limpeza,
+; um carry ou acumulador sujo pode corromper o primeiro byte enviado ao
+; DS1620. RST e CLK do DS1620 sao forcados para baixo (repouso correto do
+; barramento); DQ fica em 1 (liberado, padrao quasi-bidirecional).
+MAIN:
+    MOV  SP, #5FH
+    CLR  A
+    MOV  B,  #0
+    MOV  R0, #0
+    MOV  R1, #0
+    MOV  R2, #0
+    MOV  R3, #0
+    MOV  R4, #0
+    MOV  R5, #0
+    MOV  R6, #0
+    MOV  R7, #0
+    CLR  C
+    MOV  P0, #0FFH
+    MOV  P2, #0FFH
+    MOV  P3, #0FFH
+    CLR  DS_RST
+    CLR  DS_CLK
+
+    LCALL LCD_INIT
+
+    MOV  A, #80H              ; DDRAM address 00H = inicio da linha 1
+    LCALL LCD_CMD
+    MOV  DPTR, #STR_LABEL
+    LCALL LCD_PRINT_ROM
+
+    LCALL DS1620_INIT
+    LCALL DS1620_START
+
+LOOP:
+    LCALL DS1620_WAIT_DONE
+    LCALL DS1620_READ_TEMP
+    LCALL DECODE_TEMP
+    LCALL TEMP_TO_ASCII
+    LCALL LCD_ATUALIZA
+
+    LCALL DELAY_SIM_PAUSA    ; troque por DELAY_500MS para hardware real
+    AJMP LOOP
+
+; Protocolo 3 fios do DS1620: RST sobe, envia comando (8 bits LSB primeiro),
+; envia/recebe dados (8 ou 9 bits LSB primeiro), RST desce. Na transmissao o
+; dado e colocado antes da borda de subida do CLK; na recepcao o dado so e
+; valido enquanto o CLK esta em nivel baixo (datasheet: DQ fica em alta
+; impedancia com CLK alto).
+
+; Grava o byte de configuracao (CPU=1, modo continuo). Vai para EEPROM
+; interna, que leva ate 10ms para gravar - por isso o DELAY_10MS depois.
+DS1620_INIT:
+    LCALL DS_RST_HIGH
+    MOV  A, #CMD_WR_CFG
+    LCALL DS_SEND_BYTE
+    MOV  A, #CFG_CPU_CONT
+    LCALL DS_SEND_BYTE
+    LCALL DS_RST_LOW
+    LCALL DELAY_10MS
+    RET
+
+; Dispara a conversao continua (o DS1620 fica convertendo a cada ~750ms
+; sem precisar reenviar este comando, pois 1SHOT=0).
+DS1620_START:
+    LCALL DS_RST_HIGH
+    MOV  A, #CMD_START
+    LCALL DS_SEND_BYTE
+    LCALL DS_RST_LOW
+    RET
+
+; Espera o bit DONE (bit 7 do configuration register) indicar que a
+; conversao terminou, perguntando repetidamente via Read Config com uma
+; pausa curta entre tentativas. A pausa e necessaria: sem ela, o timeout
+; de tentativas estoura em microssegundos, muito antes dos 750ms reais que
+; a conversao leva. Sai do loop assim que DONE=1 for detectado (nao espera
+; o pior caso inteiro se a conversao terminar antes); o contador de
+; tentativas e so uma rede de seguranca para nao travar se DONE nunca vier.
+DS1620_WAIT_DONE:
+    MOV  R2, #DONE_POLL_MAX
+
+WAIT_DONE_LOOP:
+    LCALL DS_RST_HIGH
+    MOV  A, #CMD_RD_CFG
+    LCALL DS_SEND_BYTE
+    LCALL DS_RECV_BYTE
+    LCALL DS_RST_LOW
+
+    ANL  A, #80H
+    JNZ  WAIT_DONE_OK
+
+    LCALL DELAY_DONE_POLL
+    DJNZ R2, WAIT_DONE_LOOP
+
+WAIT_DONE_OK:
+    RET
+
+; Le os 9 bits da temperatura: 8 bits (fracao + parte inteira) vem por
+; DS_RECV_BYTE, e o 9o bit (sinal) vem separado por DS_RECV_BIT.
+DS1620_READ_TEMP:
+    LCALL DS_RST_HIGH
+    MOV  A, #CMD_RD_TEMP
+    LCALL DS_SEND_BYTE
+
+    LCALL DS_RECV_BYTE
+    MOV  TEMP_RAW_L, A
+
+    LCALL DS_RECV_BIT
+    MOV  A, #0
+    RLC  A
+    MOV  TEMP_RAW_H, A
+
+    LCALL DS_RST_LOW
+    RET
+
+; RST alto inicia a transacao, RST baixo encerra. CLK deve estar baixo
+; antes de RST subir.
+DS_RST_HIGH:
+    CLR  DS_CLK
+    SETB DS_RST
+    RET
+
+DS_RST_LOW:
+    CLR  DS_RST
+    RET
+
+; Envia 8 bits de A para o DS1620, LSB primeiro: coloca o bit em DQ, depois
+; pulsa CLK (sobe e desce).
+DS_SEND_BYTE:
+    MOV  R6, #8
+
+SEND_LOOP:
+    RRC  A
+    MOV  DS_DQ, C
+    SETB DS_CLK
+    CLR  DS_CLK
+    DJNZ R6, SEND_LOOP
+    RET
+
+; Recebe 8 bits do DS1620, LSB primeiro -> A. DQ precisa estar liberado
+; como entrada (SETB) antes de ler, por causa do pull-down do proprio 8051
+; em portas quasi-bidirecionais. Cada bit: CLK desce (DS1620 coloca o bit),
+; le DQ, CLK sobe.
+DS_RECV_BYTE:
+    SETB DS_DQ
+    MOV  A, #0
+    MOV  R6, #8
+
+RECV_LOOP:
+    CLR  DS_CLK
+    MOV  C, DS_DQ
+    SETB DS_CLK
+    RRC  A
+    DJNZ R6, RECV_LOOP
+    RET
+
+; Recebe um unico bit (usado para o 9o bit/sinal da temperatura) -> Carry.
+DS_RECV_BIT:
+    SETB DS_DQ
+    CLR  DS_CLK
+    MOV  C, DS_DQ
+    SETB DS_CLK
+    RET
+
+; A temperatura vem em complemento de 2 de 9 bits, LSB = 0.5C. Tratamos
+; TEMP_RAW_L:TEMP_RAW_H como um inteiro signed de 16 bits (estendendo o
+; bit de sinal para FFh ou 00h), dividimos por 2 via shift aritmetico
+; (RRC encadeado entre os dois bytes) para separar parte inteira de
+; fracao, e se for negativo convertemos o resultado para valor absoluto
+; (inverte+soma 1) para exibir como "-025" com o sinal separado do numero.
+DECODE_TEMP:
+    MOV  A, TEMP_RAW_H
+    ANL  A, #01H
+    MOV  TEMP_NEG, A
+    JZ   EXT_POS
+    MOV  A, #0FFH
+    SJMP EXT_FIM
+EXT_POS:
+    MOV  A, #00H
+EXT_FIM:
+    MOV  TEMP_RAW_H, A
+
+    MOV  A, TEMP_RAW_L
+    ANL  A, #01H
+    JZ   FRAC_ZERO
+    MOV  TEMP_FRAC, #5
+    SJMP FRAC_FIM
+FRAC_ZERO:
+    MOV  TEMP_FRAC, #0
+FRAC_FIM:
+
+    MOV  A, TEMP_RAW_H
+    RRC  A
+    MOV  A, TEMP_RAW_L
+    RRC  A
+    MOV  TEMP_INT, A
+
+    MOV  A, TEMP_NEG
+    JZ   DECODE_FIM
+    MOV  A, TEMP_INT
+    CPL  A
+    ADD  A, #1
+    MOV  TEMP_INT, A
+
+DECODE_FIM:
+    RET
+
+; Converte TEMP_INT (0-125) e TEMP_FRAC em digitos ASCII por subtracao
+; reiterada (mesma tecnica do projeto RPM), preenchendo o buffer TBUF_*.
+TEMP_TO_ASCII:
+    MOV  A, TEMP_NEG
+    JZ   ASCII_POS
+    MOV  TBUF_SIGN, #'-'
+    SJMP ASCII_SINAL_FIM
+ASCII_POS:
+    MOV  TBUF_SIGN, #' '
+ASCII_SINAL_FIM:
+
+    MOV  R0, TEMP_INT
+    MOV  R3, #0
+DIG_C:
+    MOV  A, R0
+    CLR  C
+    SUBB A, #100
+    JC   FIM_DIG_C
+    MOV  R0, A
+    INC  R3
+    AJMP DIG_C
+FIM_DIG_C:
+    MOV  A, R3
+    ADD  A, #30H
+    MOV  TBUF_DIG2, A
+
+    MOV  R3, #0
+DIG_D:
+    MOV  A, R0
+    CLR  C
+    SUBB A, #10
+    JC   FIM_DIG_D
+    MOV  R0, A
+    INC  R3
+    AJMP DIG_D
+FIM_DIG_D:
+    MOV  A, R3
+    ADD  A, #30H
+    MOV  TBUF_DIG1, A
+
+    MOV  A, R0
+    ADD  A, #30H
+    MOV  TBUF_DIG0, A
+
+    MOV  TBUF_DOT, #'.'
+    MOV  A, TEMP_FRAC
+    ADD  A, #30H
+    MOV  TBUF_FRAC, A
+    RET
+
+; Escreve a linha 1 do LCD: "TEMP: " + sinal + 3 digitos + "." + fracao +
+; simbolo de grau (0xDF na CGROM do HD44780) + "C". Reescreve a linha
+; inteira a cada chamada por simplicidade.
+; Escreve o valor da temperatura na linha 2: sinal + 3 digitos + "." +
+; fracao + simbolo de grau (0xDF na CGROM do HD44780) + "C". A linha 1
+; ("TEMPERATURA:") e fixa, escrita uma unica vez em MAIN.
+LCD_ATUALIZA:
+    MOV  A, #0C0H              ; DDRAM address 40H = inicio da linha 2
+    LCALL LCD_CMD
+
+    MOV  A, TBUF_SIGN
+    LCALL LCD_DATA
+    MOV  A, TBUF_DIG2
+    LCALL LCD_DATA
+    MOV  A, TBUF_DIG1
+    LCALL LCD_DATA
+    MOV  A, TBUF_DIG0
+    LCALL LCD_DATA
+    MOV  A, TBUF_DOT
+    LCALL LCD_DATA
+    MOV  A, TBUF_FRAC
+    LCALL LCD_DATA
+
+    MOV  A, #0DFH
+    LCALL LCD_DATA
+    MOV  A, #'C'
+    LCALL LCD_DATA
+    RET
+
+; Inicializacao do LCD por software (datasheet HD44780, Figure 23). Sem
+; uso do Busy Flag (RW e sempre saida); delays seguem os tempos minimos do
+; datasheet. Os tres Function Sets iniciais forcam o modo 8 bits, ja que o
+; LCD pode ter ligado em modo 4 bits.
+LCD_INIT:
+    CLR  LCD_RW
+    CLR  LCD_RS
+    CLR  LCD_E
+    LCALL DELAY_15MS
+
+    MOV  P0, #30H
+    SETB LCD_E
+    CLR  LCD_E
+    LCALL DELAY_4100US
+
+    MOV  P0, #30H
+    SETB LCD_E
+    CLR  LCD_E
+    LCALL DELAY_100US
+
+    MOV  P0, #30H
+    SETB LCD_E
+    CLR  LCD_E
+    LCALL DELAY_100US
+
+    MOV  A, #38H              ; 8 bits, 2 linhas, fonte 5x8
+    LCALL LCD_CMD
+    MOV  A, #08H              ; Display OFF
+    LCALL LCD_CMD
+    MOV  A, #01H              ; Clear Display
+    LCALL LCD_CMD
+    LCALL DELAY_1520US
+    MOV  A, #06H              ; Entry Mode: incrementa cursor
+    LCALL LCD_CMD
+    MOV  A, #0CH              ; Display ON, cursor OFF
+    LCALL LCD_CMD
+    RET
+
+; Envia comando (RS=0) ou dado (RS=1) ao LCD via P0, pulsando E.
+LCD_CMD:
+    CLR  LCD_RS
+    MOV  P0, A
+    SETB LCD_E
+    CLR  LCD_E
+    LCALL DELAY_37US
+    RET
+
+LCD_DATA:
+    SETB LCD_RS
+    MOV  P0, A
+    SETB LCD_E
+    CLR  LCD_E
+    LCALL DELAY_37US
+    RET
+
+; Imprime string terminada em 00H, armazenada na CODE memory e apontada
+; por DPTR, usando MOVC.
+LCD_PRINT_ROM:
+    CLR  A
+    MOVC A, @A+DPTR
+    JZ   PRINT_FIM
+    LCALL LCD_DATA
+    INC  DPTR
+    AJMP LCD_PRINT_ROM
+PRINT_FIM:
+    RET
+
+; Delays calibrados para 12MHz (DJNZ = 2 ciclos, MOV Rn,#imm = 1 ciclo).
+; DELAY_900MS e DELAY_500MS sao os valores corretos para hardware real;
+; DELAY_DONE_POLL e DELAY_SIM_PAUSA sao versoes curtas usadas no simulador,
+; que roda muito mais lento que tempo real com virtual hardware ligado.
+
+DELAY_37US:
+    MOV  R7, #18
+    DJNZ R7, $
+    RET
+
+DELAY_100US:
+    MOV  R7, #49
+    DJNZ R7, $
+    RET
+
+DELAY_1520US:
+    MOV  R6, #15
+D1520_LP:
+    MOV  R7, #51
+    DJNZ R7, $
+    DJNZ R6, D1520_LP
+    RET
+
+DELAY_4100US:
+    MOV  R6, #41
+D4100_LP:
+    MOV  R7, #50
+    DJNZ R7, $
+    DJNZ R6, D4100_LP
+    RET
+
+DELAY_10MS:
+    MOV  R5, #2
+D10_A:
+    MOV  R6, #25
+D10_B:
+    MOV  R7, #100
+    DJNZ R7, $
+    DJNZ R6, D10_B
+    DJNZ R5, D10_A
+    RET
+
+DELAY_15MS:
+    MOV  R5, #3
+D15_A:
+    MOV  R6, #25
+D15_B:
+    MOV  R7, #100
+    DJNZ R7, $
+    DJNZ R6, D15_B
+    DJNZ R5, D15_A
+    RET
+
+DELAY_900MS:
+    MOV  R4, #18
+D900_A:
+    MOV  R5, #10
+D900_B:
+    MOV  R6, #25
+D900_C:
+    MOV  R7, #100
+    DJNZ R7, $
+    DJNZ R6, D900_C
+    DJNZ R5, D900_B
+    DJNZ R4, D900_A
+    RET
+
+DELAY_DONE_POLL:
+    MOV  R5, #2
+DSIM_A:
+    MOV  R6, #25
+DSIM_B:
+    MOV  R7, #100
+    DJNZ R7, $
+    DJNZ R6, DSIM_B
+    DJNZ R5, DSIM_A
+    RET
+
+DELAY_500MS:
+    MOV  R4, #10
+D500_A:
+    MOV  R5, #10
+D500_B:
+    MOV  R6, #25
+D500_C:
+    MOV  R7, #100
+    DJNZ R7, $
+    DJNZ R6, D500_C
+    DJNZ R5, D500_B
+    DJNZ R4, D500_A
+    RET
+
+DELAY_SIM_PAUSA:
+    MOV  R5, #3
+DSIMP_A:
+    MOV  R6, #25
+DSIMP_B:
+    MOV  R7, #93
+    DJNZ R7, $
+    DJNZ R6, DSIMP_B
+    DJNZ R5, DSIMP_A
+    RET
+
+; Strings na CODE memory, terminadas em 00H, lidas por LCD_PRINT_ROM.
+STR_LABEL:
+    DB  'T', 'E', 'M', 'P', 'E', 'R', 'A', 'T', 'U', 'R', 'A', ':', 00H
+
+    END
