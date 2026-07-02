@@ -1,4 +1,4 @@
-; FECHADURA ELETRONICA — AT89C52 @ 12MHz — Proteus VSM
+; FECHADURA ELETRONICA — AT89C52 @ 12MHz — Proteus
 ;
 ; Pinos:
 ;   P0.0-P0.7  dados LCD (modo 8-bit, RESPACK pull-up)
@@ -34,7 +34,7 @@ KEY_VAL     EQU  36H        ; ultima tecla lida (0FFH = nenhuma)
 
 ; inicializacao: portas, variaveis, LCD e tela inicial
 MAIN:
-    MOV  SP,  #5FH
+    MOV  SP,  #3FH
     CLR  A
     MOV  R0,  #0
     MOV  R1,  #0
@@ -214,8 +214,6 @@ KEY_SCAN:
     SETB P1.1
     SETB P1.2
     SETB P1.3
-    NOP
-    NOP
     JB   COL1, KS_L1C2
     MOV  KEY_VAL, #'1'
     LJMP KS_SOLTAR
@@ -232,8 +230,6 @@ KS_L2:
     CLR  P1.1
     SETB P1.2
     SETB P1.3
-    NOP
-    NOP
     JB   COL1, KS_L2C2
     MOV  KEY_VAL, #'4'
     LJMP KS_SOLTAR
@@ -250,8 +246,6 @@ KS_L3:
     SETB P1.1
     CLR  P1.2
     SETB P1.3
-    NOP
-    NOP
     JB   COL1, KS_L3C2
     MOV  KEY_VAL, #'7'
     LJMP KS_SOLTAR
@@ -268,8 +262,6 @@ KS_L4:
     SETB P1.1
     SETB P1.2
     CLR  P1.3
-    NOP
-    NOP
     JB   COL1, KS_L4C2
     LJMP KS_FIM             ; * ignorada
 KS_L4C2:
@@ -288,7 +280,6 @@ KS_AGUARDA:
     MOV  A, P1
     ANL  A, #70H            ; verifica P1.4-P1.6
     CJNE A, #70H, KS_AGUARDA
-    LCALL DELAY_20MS
 KS_FIM:
     MOV  P1, #0FFH
     RET
