@@ -1,0 +1,505 @@
+; FECHADURA ELETRONICA — AT89C52 @ 12MHz — Proteus VSM
+;
+; Pinos:
+;   P0.0-P0.7  dados LCD (modo 8-bit, RESPACK pull-up)
+;   P2.0/P2.1/P2.2  LCD RS/E/RW
+;   P1.0-P1.3  linhas teclado (saida)
+;   P1.4-P1.6  colunas teclado (entrada, sem pull-up externo)
+;   P3.5       PWM servo
+;
+; Senha: 1234 | 3 tentativas | bloqueio permanente apos falhas
+
+LCD_RS      EQU  P2.0
+LCD_E       EQU  P2.1
+LCD_RW      EQU  P2.2
+PWM_PIN     EQU  P3.5
+
+COL1        EQU  P1.4
+COL2        EQU  P1.5
+COL3        EQU  P1.6
+
+; variaveis em RAM
+BUF0        EQU  30H        ; buffer senha digitada (4 bytes)
+BUF1        EQU  31H
+BUF2        EQU  32H
+BUF3        EQU  33H
+DIGIT_CNT   EQU  34H        ; digitos inseridos ate agora
+ERR_CNT     EQU  35H        ; tentativas erradas
+KEY_VAL     EQU  36H        ; ultima tecla lida (0FFH = nenhuma)
+
+    ORG  0000H
+    LJMP MAIN
+
+    ORG  0050H
+
+; inicializacao: portas, variaveis, LCD e tela inicial
+MAIN:
+    MOV  SP,  #5FH
+    CLR  A
+    MOV  R0,  #0
+    MOV  R1,  #0
+    MOV  R2,  #0
+    MOV  R3,  #0
+    MOV  R4,  #0
+    MOV  R5,  #0
+    MOV  R6,  #0
+    MOV  R7,  #0
+    MOV  P0,  #0FFH
+    MOV  P1,  #0FFH
+    MOV  P2,  #0FFH
+    MOV  P3,  #0FFH
+    CLR  PWM_PIN
+    MOV  DIGIT_CNT, #0
+    MOV  ERR_CNT,   #0
+    MOV  KEY_VAL,   #0FFH
+    LCALL LCD_INIT
+    LCALL TELA_INICIAL
+
+; loop principal: verifica bloqueio, mantem servo em 0 graus e le teclado
+LOOP_PRINCIPAL:
+    MOV  A, ERR_CNT
+    CJNE A, #3, LOOP_LER
+    LJMP LOOP_BLOQUEADO
+LOOP_LER:
+    SETB PWM_PIN
+    LCALL DELAY_1MS_SERVO    ; pulso 1ms mantem servo em 0 graus
+    CLR  PWM_PIN
+    LCALL KEY_SCAN
+    MOV  A, KEY_VAL
+    CJNE A, #0FFH, LOOP_PROCESSA
+    LJMP LOOP_PRINCIPAL
+LOOP_PROCESSA:
+    LCALL PROCESSA_DIGITO
+    LJMP LOOP_PRINCIPAL
+LOOP_BLOQUEADO:
+    LCALL TELA_BLOQUEADO
+TRAVA:
+    LJMP TRAVA
+
+; armazena digito no buffer, exibe asterisco e verifica senha ao 4o digito
+PROCESSA_DIGITO:
+    MOV  A, KEY_VAL
+    MOV  R0, DIGIT_CNT
+    CJNE R0, #0, PD_1
+    MOV  BUF0, A
+    SJMP PD_MOSTRA
+PD_1:
+    CJNE R0, #1, PD_2
+    MOV  BUF1, A
+    SJMP PD_MOSTRA
+PD_2:
+    CJNE R0, #2, PD_3
+    MOV  BUF2, A
+    SJMP PD_MOSTRA
+PD_3:
+    MOV  BUF3, A
+PD_MOSTRA:
+    LCALL LCD_MOSTRA_ASTERISCO
+    INC  DIGIT_CNT
+    MOV  A, DIGIT_CNT
+    CJNE A, #4, PD_FIM
+    LCALL VERIFICA_SENHA
+PD_FIM:
+    RET
+
+; compara buffer com senha 1234; abre servo se correta, conta erro se errada
+VERIFICA_SENHA:
+    MOV  A, BUF0
+    CJNE A, #'1', VS_ERRADA
+    MOV  A, BUF1
+    CJNE A, #'2', VS_ERRADA
+    MOV  A, BUF2
+    CJNE A, #'3', VS_ERRADA
+    MOV  A, BUF3
+    CJNE A, #'4', VS_ERRADA
+VS_CORRETA:
+    MOV  ERR_CNT, #0
+    LCALL TELA_LIBERADO
+    LCALL SERVO_ABRE
+    LCALL DELAY_2S
+    LCALL SERVO_FECHA
+    LCALL DELAY_1S
+    LCALL TELA_INICIAL
+    SJMP VS_FIM
+VS_ERRADA:
+    INC  ERR_CNT
+    LCALL TELA_INCORRETA
+    LCALL DELAY_2S
+    MOV  A, ERR_CNT
+    CJNE A, #3, VS_VOLTA
+    SJMP VS_FIM
+VS_VOLTA:
+    LCALL TELA_INICIAL
+VS_FIM:
+    MOV  DIGIT_CNT, #0
+    RET
+
+; posiciona cursor apos "SENHA:" e escreve asterisco na posicao do digito atual
+LCD_MOSTRA_ASTERISCO:
+    MOV  A, DIGIT_CNT
+    ADD  A, #86H
+    LCALL LCD_CMD
+    MOV  A, #'*'
+    LCALL LCD_DATA
+    RET
+
+; tela de espera: exibe "SENHA:" na linha 1
+TELA_INICIAL:
+    MOV  A, #01H
+    LCALL LCD_CMD
+    LCALL DELAY_1520US
+    MOV  A, #80H
+    LCALL LCD_CMD
+    MOV  DPTR, #STR_DIGITE
+    LCALL LCD_PRINT_ROM
+    RET
+
+; tela de acesso liberado: linha 1 e linha 2
+TELA_LIBERADO:
+    MOV  A, #01H
+    LCALL LCD_CMD
+    LCALL DELAY_1520US
+    MOV  A, #80H
+    LCALL LCD_CMD
+    MOV  DPTR, #STR_LIBERADO1
+    LCALL LCD_PRINT_ROM
+    MOV  A, #0C0H
+    LCALL LCD_CMD
+    MOV  DPTR, #STR_LIBERADO2
+    LCALL LCD_PRINT_ROM
+    RET
+
+; tela de erro: exibe mensagem e contador de tentativas (X/3)
+TELA_INCORRETA:
+    MOV  A, #01H
+    LCALL LCD_CMD
+    LCALL DELAY_1520US
+    MOV  A, #80H
+    LCALL LCD_CMD
+    MOV  DPTR, #STR_INCORRETA
+    LCALL LCD_PRINT_ROM
+    MOV  A, #0C0H
+    LCALL LCD_CMD
+    MOV  DPTR, #STR_TENTATIVA
+    LCALL LCD_PRINT_ROM
+    MOV  A, ERR_CNT
+    ADD  A, #30H
+    LCALL LCD_DATA
+    MOV  A, #'/'
+    LCALL LCD_DATA
+    MOV  A, #'3'
+    LCALL LCD_DATA
+    RET
+
+; tela de bloqueio permanente apos 3 erros
+TELA_BLOQUEADO:
+    MOV  A, #01H
+    LCALL LCD_CMD
+    LCALL DELAY_1520US
+    MOV  A, #80H
+    LCALL LCD_CMD
+    MOV  DPTR, #STR_BLOQUEADO1
+    LCALL LCD_PRINT_ROM
+    MOV  A, #0C0H
+    LCALL LCD_CMD
+    MOV  DPTR, #STR_BLOQUEADO2
+    LCALL LCD_PRINT_ROM
+    RET
+
+; varredura matricial 4x3: ativa uma linha por vez, le as 3 colunas
+; coluna em baixo = tecla pressionada; soltura detectada com todas linhas em baixo
+KEY_SCAN:
+    MOV  KEY_VAL, #0FFH
+    CLR  P1.0
+    SETB P1.1
+    SETB P1.2
+    SETB P1.3
+    NOP
+    NOP
+    JB   COL1, KS_L1C2
+    MOV  KEY_VAL, #'1'
+    LJMP KS_SOLTAR
+KS_L1C2:
+    JB   COL2, KS_L1C3
+    MOV  KEY_VAL, #'2'
+    LJMP KS_SOLTAR
+KS_L1C3:
+    JB   COL3, KS_L2
+    MOV  KEY_VAL, #'3'
+    LJMP KS_SOLTAR
+KS_L2:
+    SETB P1.0
+    CLR  P1.1
+    SETB P1.2
+    SETB P1.3
+    NOP
+    NOP
+    JB   COL1, KS_L2C2
+    MOV  KEY_VAL, #'4'
+    LJMP KS_SOLTAR
+KS_L2C2:
+    JB   COL2, KS_L2C3
+    MOV  KEY_VAL, #'5'
+    LJMP KS_SOLTAR
+KS_L2C3:
+    JB   COL3, KS_L3
+    MOV  KEY_VAL, #'6'
+    LJMP KS_SOLTAR
+KS_L3:
+    SETB P1.0
+    SETB P1.1
+    CLR  P1.2
+    SETB P1.3
+    NOP
+    NOP
+    JB   COL1, KS_L3C2
+    MOV  KEY_VAL, #'7'
+    LJMP KS_SOLTAR
+KS_L3C2:
+    JB   COL2, KS_L3C3
+    MOV  KEY_VAL, #'8'
+    LJMP KS_SOLTAR
+KS_L3C3:
+    JB   COL3, KS_L4
+    MOV  KEY_VAL, #'9'
+    LJMP KS_SOLTAR
+KS_L4:
+    SETB P1.0
+    SETB P1.1
+    SETB P1.2
+    CLR  P1.3
+    NOP
+    NOP
+    JB   COL1, KS_L4C2
+    LJMP KS_FIM             ; * ignorada
+KS_L4C2:
+    JB   COL2, KS_L4C3
+    MOV  KEY_VAL, #'0'
+    LJMP KS_SOLTAR
+KS_L4C3:
+    JB   COL3, KS_FIM       ; # ignorada
+    LJMP KS_FIM
+KS_SOLTAR:
+    CLR  P1.0               ; todas linhas em baixo para detectar soltura
+    CLR  P1.1
+    CLR  P1.2
+    CLR  P1.3
+KS_AGUARDA:
+    MOV  A, P1
+    ANL  A, #70H            ; verifica P1.4-P1.6
+    CJNE A, #70H, KS_AGUARDA
+    LCALL DELAY_20MS
+KS_FIM:
+    MOV  P1, #0FFH
+    RET
+
+; gera 50 pulsos PWM de 2ms em P3.5 — move servo para 90 graus
+SERVO_ABRE:
+    MOV  R4, #50
+SA_LOOP:
+    SETB PWM_PIN
+    LCALL DELAY_2MS_SERVO
+    CLR  PWM_PIN
+    LCALL DELAY_18MS_SERVO
+    DJNZ R4, SA_LOOP
+    RET
+
+; gera 50 pulsos PWM de 1ms em P3.5 — retorna servo para 0 graus
+SERVO_FECHA:
+    MOV  R4, #50
+SF_LOOP:
+    SETB PWM_PIN
+    LCALL DELAY_1MS_SERVO
+    CLR  PWM_PIN
+    LCALL DELAY_19MS_SERVO
+    DJNZ R4, SF_LOOP
+    RET
+
+; sequencia de inicializacao HD44780: modo 8-bit, 2 linhas, cursor off
+LCD_INIT:
+    CLR  LCD_RW
+    CLR  LCD_RS
+    CLR  LCD_E
+    LCALL DELAY_15MS
+    MOV  P0, #30H
+    SETB LCD_E
+    CLR  LCD_E
+    LCALL DELAY_4100US
+    MOV  P0, #30H
+    SETB LCD_E
+    CLR  LCD_E
+    LCALL DELAY_37US
+    MOV  P0, #30H
+    SETB LCD_E
+    CLR  LCD_E
+    LCALL DELAY_37US
+    MOV  A, #38H
+    LCALL LCD_CMD
+    MOV  A, #08H
+    LCALL LCD_CMD
+    MOV  A, #01H
+    LCALL LCD_CMD
+    LCALL DELAY_1520US
+    MOV  A, #06H
+    LCALL LCD_CMD
+    MOV  A, #0CH
+    LCALL LCD_CMD
+    RET
+
+; envia comando ao LCD (RS=0)
+LCD_CMD:
+    CLR  LCD_RS
+    MOV  P0, A
+    SETB LCD_E
+    CLR  LCD_E
+    LCALL DELAY_37US
+    RET
+
+; envia dado ao LCD (RS=1)
+LCD_DATA:
+    SETB LCD_RS
+    MOV  P0, A
+    SETB LCD_E
+    CLR  LCD_E
+    LCALL DELAY_37US
+    RET
+
+; imprime string terminada em 00H armazenada na ROM
+LCD_PRINT_ROM:
+    CLR  A
+    MOVC A, @A+DPTR
+    JZ   LPR_FIM
+    LCALL LCD_DATA
+    INC  DPTR
+    AJMP LCD_PRINT_ROM
+LPR_FIM:
+    RET
+
+; delays gerais @ 12MHz
+DELAY_37US:
+    MOV  R7, #18
+    DJNZ R7, $
+    RET
+
+DELAY_1520US:
+    MOV  R6, #15
+D1520_LP:
+    MOV  R7, #51
+    DJNZ R7, $
+    DJNZ R6, D1520_LP
+    RET
+
+DELAY_4100US:
+    MOV  R6, #41
+D4100_LP:
+    MOV  R7, #50
+    DJNZ R7, $
+    DJNZ R6, D4100_LP
+    RET
+
+DELAY_15MS:
+    MOV  R5, #3
+D15_A:
+    MOV  R6, #25
+D15_B:
+    MOV  R7, #100
+    DJNZ R7, $
+    DJNZ R6, D15_B
+    DJNZ R5, D15_A
+    RET
+
+DELAY_20MS:
+    MOV  R5, #4
+D20_A:
+    MOV  R6, #25
+D20_B:
+    MOV  R7, #100
+    DJNZ R7, $
+    DJNZ R6, D20_B
+    DJNZ R5, D20_A
+    RET
+
+DELAY_1S:
+    MOV  R4, #20
+D1S_A:
+    MOV  R5, #10
+D1S_B:
+    MOV  R6, #25
+D1S_C:
+    MOV  R7, #100
+    DJNZ R7, $
+    DJNZ R6, D1S_C
+    DJNZ R5, D1S_B
+    DJNZ R4, D1S_A
+    RET
+
+DELAY_2S:
+    MOV  R4, #40
+D2S_A:
+    MOV  R5, #10
+D2S_B:
+    MOV  R6, #25
+D2S_C:
+    MOV  R7, #100
+    DJNZ R7, $
+    DJNZ R6, D2S_C
+    DJNZ R5, D2S_B
+    DJNZ R4, D2S_A
+    RET
+
+; delays PWM servo @ 12MHz (periodo 20ms)
+DELAY_1MS_SERVO:
+    MOV  R6, #10
+D1MS_LP:
+    MOV  R7, #48
+    DJNZ R7, $
+    DJNZ R6, D1MS_LP
+    RET
+
+DELAY_2MS_SERVO:
+    MOV  R6, #20
+D2MS_LP:
+    MOV  R7, #50
+    DJNZ R7, $
+    DJNZ R6, D2MS_LP
+    RET
+
+DELAY_18MS_SERVO:
+    MOV  R5, #4
+D18_A:
+    MOV  R6, #22
+D18_B:
+    MOV  R7, #100
+    DJNZ R7, $
+    DJNZ R6, D18_B
+    DJNZ R5, D18_A
+    RET
+
+DELAY_19MS_SERVO:
+    MOV  R5, #4
+D19_A:
+    MOV  R6, #23
+D19_B:
+    MOV  R7, #100
+    DJNZ R7, $
+    DJNZ R6, D19_B
+    DJNZ R5, D19_A
+    RET
+
+; strings exibidas no LCD
+STR_DIGITE:
+    DB  'SENHA:          ', 00H
+STR_LIBERADO1:
+    DB  'ACESSO LIBERADO ', 00H
+STR_LIBERADO2:
+    DB  'ABRINDO...      ', 00H
+STR_INCORRETA:
+    DB  'SENHA INCORRETA ', 00H
+STR_TENTATIVA:
+    DB  'TENTATIVA ', 00H
+STR_BLOQUEADO1:
+    DB  'SISTEMA         ', 00H
+STR_BLOQUEADO2:
+    DB  'BLOQUEADO       ', 00H
+
+    END
